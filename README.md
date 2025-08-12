@@ -58,17 +58,17 @@ python sqlite-db.py --gui --db your_database.sqlite
 ```
   If the database file doesn’t exist, it will be created.
 
-Import CSV files into new tables via the Import CSV button.
+-- Import CSV files into new tables via the Import CSV button.
 
-Select tables on the left to browse data.
+-- Select tables on the left to browse data.
 
-Use the Search box to filter rows with SQL WHERE clauses.
+-- Use the Search box to filter rows with SQL WHERE clauses.
 
-Export selected tables to CSV files.
+-- Export selected tables to CSV files.
 
-View table schema details.
+-- View table schema details.
 
-Refresh the table list to see updates.
+-- Refresh the table list to see updates.
 
 
 ## CLI Mode
@@ -102,28 +102,17 @@ CSV imports enforce file size limits and validate data consistency
 ## Included Cheat Sheet
 Check out the SQL_Cheat_Sheet.md for a curated list of beginner-friendly SQL commands to get you started quickly with the CLI interface, including:
 
-Basic SELECT statements
+-- Basic SELECT statements
 
-Filtering with WHERE clauses
+-- Filtering with WHERE clauses
 
-Creating tables
+-- Creating tables
 
-Inserting data
+-- Inserting data
 
-Updating and deleting records
+-- Updating and deleting records
 
-Useful PRAGMA commands
-
-## Future Enhancements
-Add multi-table joins support in GUI
-
-Table deletion and schema editing in GUI with confirmation
-
-User authentication and permission management
-
-Encrypted database support
-
-Advanced query editor with syntax highlighting
+-- Useful PRAGMA commands
 
 ## License
 MIT License — free to use, modify, and share!
