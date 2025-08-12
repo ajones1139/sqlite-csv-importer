@@ -11,52 +11,59 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog
 
 # === Constants ===
-LOG_FILE = 'sqlite_manager_error.log'  # Uniform, recognizable log file
-MAX_CSV_SIZE = 10 * 1024 * 1024  # 10 MB max CSV file size
-IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")  # Valid SQLite identifiers
+LOG_FILE = 'sqlite_manager_error.log'  # File where errors will be logged with timestamp and stack trace
+MAX_CSV_SIZE = 10 * 1024 * 1024  # Maximum allowed CSV file size: 10 MB
+# Regular expression to validate SQLite identifiers (table/column names)
+IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
-# Allowed SQL prefixes for safe and dangerous commands
+# Allowed SQL prefixes for read-only (safe) commands
 SAFE_SQL_PREFIXES = ("SELECT", "PRAGMA", "EXPLAIN")
+# SQL prefixes considered dangerous (can modify data or schema)
 DANGEROUS_SQL_PREFIXES = ("UPDATE", "DELETE", "INSERT", "DROP", "ALTER", "REPLACE", "CREATE TABLE")
+
 
 # === Logging Functions ===
 def log_error(exc: Exception):
     """
-    Log an error to the log file with a timestamp and stack trace.
-    Useful for debugging and auditing unexpected failures.
+    Logs exceptions to a file with a timestamp and full traceback.
+    Useful for diagnosing issues without crashing the program.
     """
     with open(LOG_FILE, 'a', encoding='utf-8') as f:
         f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ERROR: {exc}\n")
         traceback.print_exc(file=f)
         f.write('\n')
 
+
 # === Database Manager Class ===
 class DatabaseManager:
     """
-    Handles all interactions with the SQLite database, including connection management,
-    table creation, import/export of CSV, audit logging, and schema inspection.
+    Encapsulates all interactions with the SQLite database:
+    connection management, schema auditing, CSV import/export,
+    and safe querying.
     """
+
     def __init__(self, db_path: str):
-        # Ensure the database file has the right extension
+        # Ensure the database filename ends with .sqlite or .db
         if not db_path.endswith('.sqlite') and not db_path.endswith('.db'):
             db_path += '.sqlite'
         self.db_path = db_path
-        self.conn = None
+        self.conn = None  # Will hold sqlite3 connection object
 
     def connect(self):
         """
-        Connect to the SQLite database (if not already connected).
-        Sets row_factory for convenient row access and creates audit table.
+        Opens a connection to the SQLite database if not already connected.
+        Sets row_factory for dict-like row access.
+        Also ensures the audit_log table exists for event logging.
         """
         if self.conn:
-            return
+            return  # Already connected
         self.conn = sqlite3.connect(self.db_path, isolation_level=None, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self._create_audit_table()
 
     def close(self):
         """
-        Close the database connection cleanly.
+        Cleanly close the database connection if open.
         """
         if self.conn:
             try:
@@ -66,8 +73,8 @@ class DatabaseManager:
 
     def _create_audit_table(self):
         """
-        Create an audit_log table if it does not exist.
-        This logs important events for security/audit purposes.
+        Creates a table named 'audit_log' to record important events
+        like imports, queries, and table creations for auditing purposes.
         """
         self.connect()
         with self.conn:
@@ -82,7 +89,8 @@ class DatabaseManager:
 
     def _log_event(self, event_type: str, details: str):
         """
-        Record an event in the audit_log table.
+        Inserts an event into the audit_log table.
+        If logging fails, it writes the error to the error log file.
         """
         try:
             with self.conn:
@@ -95,7 +103,8 @@ class DatabaseManager:
 
     def list_tables(self):
         """
-        Return a list of all user tables (excluding SQLite internal tables).
+        Returns a list of all user-created tables in the database,
+        excluding internal SQLite tables.
         """
         self.connect()
         cur = self.conn.cursor()
@@ -104,7 +113,8 @@ class DatabaseManager:
 
     def safe_query(self, query: str):
         """
-        Execute a read-only query and return results.
+        Executes a read-only query and returns all fetched rows.
+        Caller must ensure query safety.
         """
         self.connect()
         cur = self.conn.cursor()
@@ -113,7 +123,8 @@ class DatabaseManager:
 
     def table_info(self, table_name: str):
         """
-        Return schema info for a specific table.
+        Returns detailed schema info for a table:
+        columns with names, types, nullability, primary key flags, etc.
         """
         self.connect()
         cur = self.conn.cursor()
@@ -122,8 +133,13 @@ class DatabaseManager:
 
     def import_csv(self, csv_path: str, table_name: str, append: bool = False, create_index_on: str | None = None):
         """
-        Import a CSV file into a table. Creates the table if needed, validates data,
-        and optionally creates an index. Handles header sanitization and type inference.
+        Imports data from a CSV file into a SQLite table.
+        - Validates CSV size and mime-type.
+        - Sanitizes headers to valid SQL identifiers.
+        - Infers column types (INTEGER, REAL, TEXT) from sample data.
+        - Creates table if not exists (or appends if append=True).
+        - Optionally creates an index on a specified column.
+        - Logs the import event.
         """
         tn = sanitize_identifier(table_name)
 
@@ -141,16 +157,17 @@ class DatabaseManager:
             if headers is None:
                 raise ValueError("CSV appears empty")
 
-            # Sanitize headers
+            # Sanitize headers: strip spaces, replace spaces with underscores, fallback to col{i}
             headers = [h.strip().replace(" ", "_") or f"col{i}" for i, h in enumerate(headers)]
             for i, h in enumerate(headers):
                 if not IDENT_RE.match(h):
+                    # Replace invalid chars with underscore, fallback to hashed col name
                     safe = re.sub(r"[^A-Za-z0-9_]", "_", h)
                     if not IDENT_RE.match(safe):
                         safe = f"col_{hash(h) & 0xFFFF}"
                     headers[i] = safe
 
-            # Read sample rows for type inference
+            # Read up to 20 sample rows for type inference
             sample_rows = []
             for _ in range(20):
                 try:
@@ -161,7 +178,7 @@ class DatabaseManager:
                 except StopIteration:
                     break
 
-            # Infer column types
+            # Infer SQLite column types based on samples
             columns_sql = []
             for col_idx, col_name in enumerate(headers):
                 sample_vals = [row[col_idx] if col_idx < len(row) else "" for row in sample_rows]
@@ -178,24 +195,26 @@ class DatabaseManager:
             create_fragment = ", ".join(columns_sql)
 
             with self.conn:
+                # Create table if it doesn't exist
                 cur.execute(f"CREATE TABLE IF NOT EXISTS '{tn}' ({create_fragment})")
+
                 placeholders = ",".join(["?"] * len(headers))
                 collist = ",".join([f"'{c}'" for c in headers])
                 insert_sql = f"INSERT INTO '{tn}' ({collist}) VALUES ({placeholders})"
 
-                # Insert sample rows
+                # Insert sample rows already read
                 for row in sample_rows:
                     cleaned = [str(cell).strip() for cell in row]
                     cur.execute(insert_sql, cleaned)
 
-                # Insert the rest of the rows
+                # Insert remaining rows from CSV
                 for row in reader:
                     if len(row) != len(headers):
                         raise ValueError("CSV row length mismatch during import")
                     cleaned = [str(cell).strip() for cell in row]
                     cur.execute(insert_sql, cleaned)
 
-                # Optionally create index
+                # Create index on column if specified
                 if create_index_on:
                     ci = sanitize_identifier(create_index_on)
                     idx_name = f"idx_{tn}_{ci}"
@@ -205,7 +224,8 @@ class DatabaseManager:
 
     def export_table_to_csv(self, table_name: str, filepath: str):
         """
-        Export a table's rows to a CSV file with headers.
+        Exports all rows of a table to a CSV file, including column headers.
+        Logs the export event.
         """
         self.connect()
         cur = self.conn.cursor()
@@ -214,16 +234,17 @@ class DatabaseManager:
         columns = [desc[0] for desc in cur.description]
         with open(filepath, 'w', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
-            writer.writerow(columns)
+            writer.writerow(columns)  # Write headers
             for row in rows:
                 writer.writerow([row[col] for col in columns])
         self._log_event("EXPORT_CSV", f"Exported table {table_name} to {filepath}")
 
+
 # === Helper Functions ===
 def sanitize_identifier(name: str) -> str:
     """
-    Check that a string is a valid SQLite identifier (table/column name).
-    Prevents SQL injection and confusion in schema.
+    Validates that the string is a valid SQLite identifier (letters, numbers, underscores,
+    not starting with a number). Raises ValueError if invalid.
     """
     if not isinstance(name, str):
         raise ValueError("Identifier must be a string")
@@ -232,46 +253,54 @@ def sanitize_identifier(name: str) -> str:
         raise ValueError(f"Invalid identifier: {name!r}. Allowed: letters, numbers, underscore, not starting with number.")
     return name
 
+
 def consistent_types(values):
     """
-    Given a sample list of values, infer the most consistent SQLite type (INTEGER, REAL, TEXT).
-    Used for auto-generating table schemas from CSV data.
+    Given a list of sample values, determines the most appropriate SQLite
+    column type among INTEGER, REAL, or TEXT.
+    Returns TEXT if any empty or non-numeric values are found.
     """
     t = "INTEGER"
     for v in values:
         if v == "":
-            return "TEXT"
+            return "TEXT"  # Empty values -> fallback to TEXT
         try:
-            int(v)
+            int(v)  # Try integer cast
             continue
         except Exception:
             try:
-                float(v)
+                float(v)  # Try float cast
                 if t == "INTEGER":
-                    t = "REAL"
+                    t = "REAL"  # Promote INTEGER to REAL if float found
             except Exception:
-                return "TEXT"
+                return "TEXT"  # Non-numeric -> TEXT
     return t
+
 
 # === CLI Functions ===
 def is_sql_dangerous(sql: str) -> bool:
     """
-    Determine if an SQL command is considered dangerous (modifies database or schema).
-    Used for user warnings and confirmations.
+    Checks if the SQL statement is dangerous (can modify data or schema),
+    based on prefixes.
     """
     sql = sql.strip().upper()
     return any(sql.startswith(prefix) for prefix in DANGEROUS_SQL_PREFIXES)
 
+
 def is_sql_safe(sql: str) -> bool:
     """
-    Determine if an SQL command is considered safe (read-only operations).
+    Checks if the SQL statement is read-only safe, based on prefixes.
     """
     sql = sql.strip().upper()
     return any(sql.startswith(prefix) for prefix in SAFE_SQL_PREFIXES)
 
+
 def cli_create_table(db_manager, create_stmt: str):
     """
-    CLI utility to create a table. Validates statement and logs creation.
+    CLI handler to create a table.
+    - Ensures the statement is a single CREATE TABLE statement.
+    - Executes and logs the creation.
+    - Prints success or error messages.
     """
     if not create_stmt.strip().upper().startswith("CREATE TABLE"):
         print("Error: Only CREATE TABLE statements are allowed for create-table command.")
@@ -291,9 +320,14 @@ def cli_create_table(db_manager, create_stmt: str):
         print(f"Error creating table: {e}")
         log_error(e)
 
+
 def cli_query(db_manager, query: str):
     """
-    CLI utility to run a query. Warns for dangerous queries, fetches and prints results for safe ones.
+    CLI handler to execute SQL queries.
+    - Validates query safety.
+    - Confirms with user before running dangerous queries.
+    - Prints query results for safe queries, or confirmation for dangerous.
+    - Logs the query.
     """
     sql_upper = query.strip().upper()
 
@@ -318,6 +352,7 @@ def cli_query(db_manager, query: str):
                 columns = [desc[0] for desc in cur.description]
                 print("\t".join(columns))
                 for row in rows:
+                    # Print each column separated by tabs, showing empty string for NULLs
                     print("\t".join(str(row[col]) if row[col] is not None else "" for col in columns))
             else:
                 print("No results.")
@@ -330,29 +365,35 @@ def cli_query(db_manager, query: str):
         print(f"Error executing query: {e}")
         log_error(e)
 
+
 # === GUI Application ===
 class App:
     """
-    Tkinter GUI for database management and CSV import/export. Allows users to browse tables,
-    run queries, import and export CSV, and inspect schemas interactively.
+    Tkinter GUI application for managing SQLite databases:
+    - Displays tables and allows refreshing the list.
+    - Supports importing CSVs into tables.
+    - Supports exporting tables to CSV.
+    - Shows first 50 rows of selected tables.
+    - Supports searching with a WHERE clause.
+    - Shows table schema details.
     """
     def __init__(self, root, db_manager):
         self.root = root
         self.db = db_manager
         self.root.title(f"SQLite CSV Importer - {self.db.db_path}")
 
-        # Top bar for DB info and actions
+        # Top bar with DB info and import/export buttons
         top = tk.Frame(root)
         top.pack(padx=10, pady=8, fill='x')
         tk.Label(top, text=f"Database: {self.db.db_path}").pack(side='left')
         tk.Button(top, text="Import CSV", command=self.import_csv_dialog).pack(side='right')
         tk.Button(top, text="Export Table", command=self.export_table_dialog).pack(side='right')
 
-        # Middle section with table list and search/results
+        # Middle frame for tables and results
         mid = tk.Frame(root)
         mid.pack(padx=10, pady=8, fill='both', expand=True)
 
-        # Table list on the left
+        # Left frame: list of tables
         left = tk.Frame(mid)
         left.pack(side='left', fill='y')
         tk.Label(left, text="Tables").pack()
@@ -363,7 +404,7 @@ class App:
         self.table_listbox.config(yscrollcommand=scrollbar.set)
         self.table_listbox.bind('<<ListboxSelect>>', lambda e: self.on_table_select())
 
-        # Results and search panel on the right
+        # Right frame: search bar and query results text box
         right = tk.Frame(mid)
         right.pack(side='left', fill='both', expand=True)
         search_frame = tk.Frame(right)
@@ -377,17 +418,18 @@ class App:
         self.results = tk.Text(right, height=20)
         self.results.pack(fill='both', expand=True)
 
-        # Bottom bar for refresh and schema
+        # Bottom frame with refresh and schema buttons
         bottom = tk.Frame(root)
         bottom.pack(padx=10, pady=8, fill='x')
         tk.Button(bottom, text="Refresh Tables", command=self.refresh_tables).pack(side='left')
         tk.Button(bottom, text="Show Schema", command=self.show_schema).pack(side='left')
 
-        self.refresh_tables()
+        self.refresh_tables()  # Load tables on startup
 
     def refresh_tables(self):
         """
-        Refresh the list of tables shown in the GUI.
+        Reloads and updates the list of tables from the database.
+        Shows an error message if unable.
         """
         try:
             tables = self.db.list_tables()
@@ -400,7 +442,8 @@ class App:
 
     def on_table_select(self):
         """
-        When a table is selected, show its first 50 rows in the results panel.
+        When a table is selected, loads up to 50 rows from that table
+        and displays them in the results text box.
         """
         sel = self.table_listbox.curselection()
         if not sel:
@@ -414,7 +457,8 @@ class App:
 
     def on_search(self):
         """
-        Perform a search (SQL WHERE clause) on the selected table and show results.
+        Executes a SELECT query with an optional WHERE clause
+        entered by the user to filter results from the selected table.
         """
         sel = self.table_listbox.curselection()
         if not sel:
@@ -434,7 +478,8 @@ class App:
 
     def display_rows(self, rows):
         """
-        Display a list of rows (as returned from a query) in the results panel.
+        Clears and displays the query result rows in the text widget.
+        Shows a header row and separator.
         """
         self.results.delete('1.0', tk.END)
         if not rows:
@@ -449,7 +494,8 @@ class App:
 
     def import_csv_dialog(self):
         """
-        Open a dialog to select a CSV file and import it into a specified table.
+        Opens a file dialog for CSV import and asks for the target table name.
+        Calls import_csv and refreshes table list on success.
         """
         filepath = filedialog.askopenfilename(filetypes=[("CSV files", "*.csv")])
         if not filepath:
@@ -467,7 +513,7 @@ class App:
 
     def export_table_dialog(self):
         """
-        Open a dialog to export the selected table to a CSV file.
+        Opens a save dialog to export selected table as CSV.
         """
         sel = self.table_listbox.curselection()
         if not sel:
@@ -485,7 +531,7 @@ class App:
 
     def show_schema(self):
         """
-        Display the schema info of the selected table in a message box.
+        Shows detailed schema info for the selected table in a message box.
         """
         sel = self.table_listbox.curselection()
         if not sel:
@@ -499,10 +545,15 @@ class App:
         except Exception as e:
             messagebox.showerror("Error", f"Failed to retrieve schema: {e}")
 
+
 # === Main ===
 def main():
     """
-    Main entry point for CLI and GUI. Parses arguments and launches appropriate interface.
+    Command-line interface entrypoint.
+    Supports:
+    - Running in GUI mode (--gui)
+    - Creating tables via CREATE TABLE statements (create-table command)
+    - Running SQL queries (query command)
     """
     parser = argparse.ArgumentParser(description="SQLite CSV Importer")
     parser.add_argument("--db", required=False, default="data.sqlite", help="SQLite database file name")
@@ -530,6 +581,7 @@ def main():
         cli_query(db_manager, args.query)
     else:
         parser.print_help()
+
 
 if __name__ == "__main__":
     main()
